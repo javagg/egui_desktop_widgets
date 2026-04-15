@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "crates/cad_widgets",
+    "crates/cad_widgets_demo",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+authors = ["GitHub Copilot"]
+
+[workspace.dependencies]
+egui = "0.33"
+eframe = { version = "0.33", default-features = true }
+egui_tiles = "0.14.0"

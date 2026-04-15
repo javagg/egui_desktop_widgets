@@ -1,0 +1,11 @@
+[package]
+name = "cad_widgets_demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+cad_widgets = { path = "../cad_widgets" }
