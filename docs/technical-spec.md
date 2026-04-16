@@ -180,6 +180,7 @@ egui_desktop_widgets/
 3. 对于当前使用的 egui 0.33，建议选用兼容版本 egui_tiles 0.14.x。
 4. 中央文档区同样可以建立独立的 egui_tiles document tree，用于承载 document tabs、document splits 与多视图联动场景。
 5. 推荐在 egui_tiles 之上保留一层项目自有的 DocumentWorkspaceBuilder、DocumentWorkspaceSnapshot 等抽象，用于持久化、恢复、示例构造和后续布局迁移。
+6. 四边 dock host 也应提供与中央工作区对称的快照与恢复能力，至少覆盖跨区迁移结果、已关闭 pane 集合和额外导入 pane 状态。
 
 ### 7.2 Widget 分类
 

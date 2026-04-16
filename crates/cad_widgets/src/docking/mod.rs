@@ -1,5 +1,5 @@
 use egui::{Color32, RichText, Sense, Ui, WidgetText};
-use egui_tiles::{Behavior, TileId, Tiles, Tree, UiResponse};
+use egui_tiles::{Behavior, SimplificationOptions, TileId, Tiles, Tree, UiResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneHeaderStyle {
@@ -13,6 +13,26 @@ pub enum DemoDockArea {
     Left,
     Right,
     Bottom,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DemoDockDragPayload {
+    pub source_area: DemoDockArea,
+    pub title: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DemoDockDropSlot {
+    Center,
+    LeftEdge,
+    RightEdge,
+    TopEdge,
+    BottomEdge,
+}
+
+#[derive(Default)]
+pub struct DemoDockShowResponse {
+    pub dropped_payload: Option<(DemoDockDragPayload, DemoDockDropSlot)>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,11 +93,27 @@ pub struct DemoDockLayout {
     area: DemoDockArea,
     tree: Tree<DemoDockContent>,
     pane_catalog: Vec<DockPaneRecord>,
-    imported_panes: Vec<DemoDockContent>,
+    imported_panes: Vec<ImportedDockPane>,
     closed_titles: Vec<String>,
     transferred_titles: Vec<String>,
     tab_bar_height: f32,
     gap_width: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct DemoDockSnapshot {
+    pub area: DemoDockArea,
+    pub imported_panes: Vec<ImportedDockPane>,
+    pub closed_titles: Vec<String>,
+    pub transferred_titles: Vec<String>,
+    pub tab_bar_height: f32,
+    pub gap_width: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportedDockPane {
+    pub slot: DemoDockDropSlot,
+    pub content: DemoDockContent,
 }
 
 #[derive(Clone)]
@@ -118,6 +154,27 @@ impl DemoDockLayout {
             .collect()
     }
 
+    pub fn snapshot(&self) -> DemoDockSnapshot {
+        DemoDockSnapshot {
+            area: self.area,
+            imported_panes: self.imported_panes.clone(),
+            closed_titles: self.closed_titles.clone(),
+            transferred_titles: self.transferred_titles.clone(),
+            tab_bar_height: self.tab_bar_height,
+            gap_width: self.gap_width,
+        }
+    }
+
+    pub fn restore(&mut self, snapshot: DemoDockSnapshot) {
+        self.area = snapshot.area;
+        self.imported_panes = snapshot.imported_panes;
+        self.closed_titles = snapshot.closed_titles;
+        self.transferred_titles = snapshot.transferred_titles;
+        self.tab_bar_height = snapshot.tab_bar_height;
+        self.gap_width = snapshot.gap_width;
+        self.rebuild();
+    }
+
     pub fn restore_last_closed(&mut self) -> Option<String> {
         let title = self.closed_titles.pop()?;
         self.set_title_visible(&title, true);
@@ -151,6 +208,10 @@ impl DemoDockLayout {
     }
 
     pub fn receive_pane(&mut self, pane: DemoDockContent) {
+        self.receive_pane_at(pane, DemoDockDropSlot::Center);
+    }
+
+    pub fn receive_pane_at(&mut self, pane: DemoDockContent, slot: DemoDockDropSlot) {
         if self
             .transferred_titles
             .iter()
@@ -162,28 +223,53 @@ impl DemoDockLayout {
         }
 
         if self.pane_catalog.iter().any(|record| record.title == pane.title)
-            || self.imported_panes.iter().any(|item| item.title == pane.title)
+            || self
+                .imported_panes
+                .iter()
+                .any(|item| item.content.title == pane.title)
         {
             return;
         }
 
-        self.imported_panes.push(pane);
+        self.imported_panes.push(ImportedDockPane {
+            slot,
+            content: pane,
+        });
         self.rebuild();
     }
 
-    pub fn show(&mut self, ui: &mut Ui) {
+    pub fn show(&mut self, ui: &mut Ui) -> DemoDockShowResponse {
         let mut behavior = DemoDockBehavior {
+            area: self.area,
             tab_bar_height: self.tab_bar_height,
             gap_width: self.gap_width,
             close_requests: Vec::new(),
         };
-        self.tree.ui(&mut behavior, ui);
+
+        let drop_frame = egui::Frame::default().inner_margin(0);
+        let mut drop_rect = None;
+        let (_, dropped_payload) = ui.dnd_drop_zone::<DemoDockDragPayload, _>(drop_frame, |ui| {
+            ui.set_min_size(ui.available_size());
+            drop_rect = Some(ui.max_rect());
+            self.tree.ui(&mut behavior, ui);
+        });
 
         for title in behavior.close_requests {
             self.set_title_visible(&title, false);
             if !self.closed_titles.contains(&title) {
                 self.closed_titles.push(title);
             }
+        }
+
+        DemoDockShowResponse {
+            dropped_payload: dropped_payload.map(|payload| {
+                let pointer_pos = ui.ctx().input(|input| input.pointer.latest_pos());
+                let slot = match (drop_rect, pointer_pos) {
+                    (Some(rect), Some(pointer)) => classify_drop_slot(rect, pointer),
+                    _ => DemoDockDropSlot::Center,
+                };
+                ((*payload).clone(), slot)
+            }),
         }
     }
 
@@ -216,6 +302,7 @@ impl DemoDockLayout {
 }
 
 struct DemoDockBehavior {
+    area: DemoDockArea,
     tab_bar_height: f32,
     gap_width: f32,
     close_requests: Vec<String>,
@@ -234,12 +321,23 @@ impl Behavior<DemoDockContent> for DemoDockBehavior {
             .stroke(egui::Stroke::new(1.0, pane.accent.gamma_multiply(0.7)))
             .inner_margin(10)
             .show(ui, |ui| {
-                render_pane_header(ui, tile_id, pane, &mut self.close_requests, &mut response);
+                let available = ui.available_size();
+                ui.set_min_size(available);
+                render_pane_header(
+                    ui,
+                    self.area,
+                    tile_id,
+                    pane,
+                    &mut self.close_requests,
+                    &mut response,
+                );
 
                 ui.add_space(8.0);
                 for line in &pane.lines {
                     ui.label(line);
                 }
+
+                ui.allocate_space(ui.available_size());
             });
 
         response
@@ -253,6 +351,13 @@ impl Behavior<DemoDockContent> for DemoDockBehavior {
         self.gap_width
     }
 
+    fn simplification_options(&self) -> SimplificationOptions {
+        SimplificationOptions {
+            prune_single_child_tabs: false,
+            ..SimplificationOptions::default()
+        }
+    }
+
     fn is_tab_closable(&self, _tiles: &Tiles<DemoDockContent>, _tile_id: TileId) -> bool {
         false
     }
@@ -260,6 +365,7 @@ impl Behavior<DemoDockContent> for DemoDockBehavior {
 
 fn render_pane_header(
     ui: &mut Ui,
+    area: DemoDockArea,
     _tile_id: TileId,
     pane: &mut DemoDockContent,
     close_requests: &mut Vec<String>,
@@ -277,7 +383,11 @@ fn render_pane_header(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let drag_response = ui
                         .add(egui::Button::new(RichText::new("::").small()).sense(Sense::drag()))
-                        .on_hover_text("Drag pane within the dock workspace");
+                        .on_hover_text("Drag pane to reorder in this host or drop into another dock host");
+                    drag_response.dnd_set_drag_payload(DemoDockDragPayload {
+                        source_area: area,
+                        title: pane.title.clone(),
+                    });
                     if drag_response.drag_started() {
                         *response = UiResponse::DragStarted;
                     }
@@ -333,7 +443,11 @@ fn render_pane_header(
                                     egui::Button::new(RichText::new(":::").small())
                                         .sense(Sense::drag()),
                                 )
-                                .on_hover_text("Drag pane within the dock workspace");
+                                .on_hover_text("Drag pane to reorder in this host or drop into another dock host");
+                            drag_response.dnd_set_drag_payload(DemoDockDragPayload {
+                                source_area: area,
+                                title: pane.title.clone(),
+                            });
                             if drag_response.drag_started() {
                                 *response = UiResponse::DragStarted;
                             }
@@ -373,7 +487,7 @@ fn render_pane_header(
 
 fn build_tree_for_area(
     area: DemoDockArea,
-    imported_panes: &[DemoDockContent],
+    imported_panes: &[ImportedDockPane],
 ) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
     match area {
         DemoDockArea::Top => build_top_tree(imported_panes),
@@ -383,7 +497,7 @@ fn build_tree_for_area(
     }
 }
 
-fn build_top_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
+fn build_top_tree(imported_panes: &[ImportedDockPane]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
     let mut tiles = Tiles::default();
     let command_content = DemoDockContent::new(
             "Command Options",
@@ -428,6 +542,7 @@ fn build_top_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>,
         DemoDockArea::Top,
         &mut tiles,
         base_root,
+        None,
         imported_panes,
         &mut pane_catalog,
     );
@@ -437,7 +552,7 @@ fn build_top_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>,
     )
 }
 
-fn build_left_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
+fn build_left_tree(imported_panes: &[ImportedDockPane]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
     let mut tiles = Tiles::default();
 
     let model_content = DemoDockContent::new(
@@ -522,6 +637,7 @@ fn build_left_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>
         DemoDockArea::Left,
         &mut tiles,
         base_root,
+        Some(tab_group),
         imported_panes,
         &mut pane_catalog,
     );
@@ -531,7 +647,7 @@ fn build_left_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>
     )
 }
 
-fn build_right_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
+fn build_right_tree(imported_panes: &[ImportedDockPane]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
     let mut tiles = Tiles::default();
 
     let properties_content = DemoDockContent::new(
@@ -599,6 +715,7 @@ fn build_right_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent
         DemoDockArea::Right,
         &mut tiles,
         base_root,
+        Some(top_tabs),
         imported_panes,
         &mut pane_catalog,
     );
@@ -608,7 +725,7 @@ fn build_right_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent
     )
 }
 
-fn build_bottom_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
+fn build_bottom_tree(imported_panes: &[ImportedDockPane]) -> (Tree<DemoDockContent>, Vec<DockPaneRecord>) {
     let mut tiles = Tiles::default();
 
     let messages_content = DemoDockContent::new(
@@ -675,6 +792,7 @@ fn build_bottom_tree(imported_panes: &[DemoDockContent]) -> (Tree<DemoDockConten
         DemoDockArea::Bottom,
         &mut tiles,
         base_root,
+        Some(left_tabs),
         imported_panes,
         &mut pane_catalog,
     );
@@ -688,26 +806,122 @@ fn attach_imported_panes(
     area: DemoDockArea,
     tiles: &mut Tiles<DemoDockContent>,
     base_root: TileId,
-    imported_panes: &[DemoDockContent],
+    primary_tab_group: Option<TileId>,
+    imported_panes: &[ImportedDockPane],
     pane_catalog: &mut Vec<DockPaneRecord>,
 ) -> TileId {
     if imported_panes.is_empty() {
         return base_root;
     }
 
-    let mut children = vec![base_root];
-    for pane in imported_panes {
-        let tile_id = tiles.insert_pane(pane.clone());
+    let mut root = base_root;
+    let mut center_tiles = Vec::new();
+    let mut left_tiles = Vec::new();
+    let mut right_tiles = Vec::new();
+    let mut top_tiles = Vec::new();
+    let mut bottom_tiles = Vec::new();
+
+    for imported in imported_panes {
+        let tile_id = tiles.insert_pane(imported.content.clone());
         pane_catalog.push(DockPaneRecord {
             tile_id,
-            title: pane.title.clone(),
-            content: pane.clone(),
+            title: imported.content.title.clone(),
+            content: imported.content.clone(),
         });
-        children.push(tile_id);
+        match imported.slot {
+            DemoDockDropSlot::Center => center_tiles.push(tile_id),
+            DemoDockDropSlot::LeftEdge => left_tiles.push(tile_id),
+            DemoDockDropSlot::RightEdge => right_tiles.push(tile_id),
+            DemoDockDropSlot::TopEdge => top_tiles.push(tile_id),
+            DemoDockDropSlot::BottomEdge => bottom_tiles.push(tile_id),
+        }
     }
 
-    match area {
-        DemoDockArea::Top | DemoDockArea::Bottom => tiles.insert_horizontal_tile(children),
-        DemoDockArea::Left | DemoDockArea::Right => tiles.insert_vertical_tile(children),
+    if !center_tiles.is_empty() {
+        if let Some(tab_group_id) = primary_tab_group {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+                tiles.get_mut(tab_group_id)
+            {
+                for tile_id in center_tiles {
+                    tabs.add_child(tile_id);
+                }
+            }
+        } else {
+            let center_group = insert_group_tile(tiles, DemoDockDropSlot::Center, center_tiles);
+            root = match area {
+                DemoDockArea::Top | DemoDockArea::Bottom => {
+                    tiles.insert_horizontal_tile(vec![root, center_group])
+                }
+                DemoDockArea::Left | DemoDockArea::Right => {
+                    tiles.insert_vertical_tile(vec![root, center_group])
+                }
+            };
+        }
     }
+
+    if !left_tiles.is_empty() {
+        let left_group = insert_group_tile(tiles, DemoDockDropSlot::LeftEdge, left_tiles);
+        root = tiles.insert_horizontal_tile(vec![left_group, root]);
+    }
+
+    if !right_tiles.is_empty() {
+        let right_group = insert_group_tile(tiles, DemoDockDropSlot::RightEdge, right_tiles);
+        root = tiles.insert_horizontal_tile(vec![root, right_group]);
+    }
+
+    if !top_tiles.is_empty() {
+        let top_group = insert_group_tile(tiles, DemoDockDropSlot::TopEdge, top_tiles);
+        root = tiles.insert_vertical_tile(vec![top_group, root]);
+    }
+
+    if !bottom_tiles.is_empty() {
+        let bottom_group = insert_group_tile(tiles, DemoDockDropSlot::BottomEdge, bottom_tiles);
+        root = tiles.insert_vertical_tile(vec![root, bottom_group]);
+    }
+
+    root
+}
+
+fn insert_group_tile(
+    tiles: &mut Tiles<DemoDockContent>,
+    slot: DemoDockDropSlot,
+    children: Vec<TileId>,
+) -> TileId {
+    match slot {
+        DemoDockDropSlot::Center => tiles.insert_tab_tile(children),
+        DemoDockDropSlot::LeftEdge | DemoDockDropSlot::RightEdge => {
+            let tabs = tiles.insert_tab_tile(children);
+            tiles.insert_vertical_tile(vec![tabs])
+        }
+        DemoDockDropSlot::TopEdge | DemoDockDropSlot::BottomEdge => {
+            let tabs = tiles.insert_tab_tile(children);
+            tiles.insert_horizontal_tile(vec![tabs])
+        }
+    }
+}
+
+fn classify_drop_slot(rect: egui::Rect, pointer: egui::Pos2) -> DemoDockDropSlot {
+    if !rect.contains(pointer) {
+        return DemoDockDropSlot::Center;
+    }
+
+    let edge_band = (rect.width().min(rect.height()) * 0.24).clamp(24.0, 72.0);
+    let left = pointer.x - rect.left();
+    let right = rect.right() - pointer.x;
+    let top = pointer.y - rect.top();
+    let bottom = rect.bottom() - pointer.y;
+
+    let mut nearest = (DemoDockDropSlot::Center, edge_band);
+    for candidate in [
+        (DemoDockDropSlot::LeftEdge, left),
+        (DemoDockDropSlot::RightEdge, right),
+        (DemoDockDropSlot::TopEdge, top),
+        (DemoDockDropSlot::BottomEdge, bottom),
+    ] {
+        if candidate.1 <= nearest.1 {
+            nearest = candidate;
+        }
+    }
+
+    nearest.0
 }

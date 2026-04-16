@@ -8,7 +8,8 @@ pub mod trees;
 pub mod workspace;
 
 pub use docking::{
-    DemoDockArea, DemoDockContent, DemoDockLayout,
+    DemoDockArea, DemoDockContent, DemoDockDragPayload, DemoDockDropSlot, DemoDockLayout,
+    DemoDockShowResponse, DemoDockSnapshot,
 };
 pub use feedback::StatusBar;
 pub use inputs::NumericField;

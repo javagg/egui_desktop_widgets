@@ -1,5 +1,6 @@
 use cad_widgets::{
-    CadTheme, CadThemeMode, DemoDockArea, DemoDockLayout, DocumentKind,
+    CadTheme, CadThemeMode, DemoDockArea, DemoDockDragPayload, DemoDockDropSlot,
+    DemoDockLayout, DemoDockSnapshot, DocumentKind,
     DocumentWorkspaceBuilder, DocumentWorkspaceLayout, DocumentWorkspaceNode,
     DocumentWorkspaceSnapshot, ShellFrame, ShellFrameConfig, ShellLayoutState, Toolbar,
     ToolbarAction, WorkspaceDocument, apply_theme,
@@ -32,9 +33,18 @@ struct DemoApp {
     left_dock_layout: DemoDockLayout,
     center_workspace_layout: DocumentWorkspaceLayout,
     saved_workspace_snapshot: Option<DocumentWorkspaceSnapshot>,
+    saved_dock_snapshot: Option<DockHostSnapshotBundle>,
     right_dock_layout: DemoDockLayout,
     bottom_dock_layout: DemoDockLayout,
     message_log: Vec<String>,
+}
+
+#[derive(Clone)]
+struct DockHostSnapshotBundle {
+    top: DemoDockSnapshot,
+    left: DemoDockSnapshot,
+    right: DemoDockSnapshot,
+    bottom: DemoDockSnapshot,
 }
 
 impl DemoApp {
@@ -49,6 +59,7 @@ impl DemoApp {
             left_dock_layout: DemoDockLayout::for_area(DemoDockArea::Left),
             center_workspace_layout: build_center_workspace(),
             saved_workspace_snapshot: None,
+            saved_dock_snapshot: None,
             right_dock_layout: DemoDockLayout::for_area(DemoDockArea::Right),
             bottom_dock_layout: DemoDockLayout::for_area(DemoDockArea::Bottom),
             message_log: vec![
@@ -81,11 +92,12 @@ fn transfer_dock_pane(
     source: &RefCell<DemoDockLayout>,
     target: &RefCell<DemoDockLayout>,
     title: &str,
+    slot: DemoDockDropSlot,
 ) -> bool {
     let Some(pane) = source.borrow_mut().transfer_pane(title) else {
         return false;
     };
-    target.borrow_mut().receive_pane(pane);
+    target.borrow_mut().receive_pane_at(pane, slot);
     true
 }
 
@@ -94,14 +106,14 @@ fn build_center_workspace() -> DocumentWorkspaceLayout {
         "center_document_tree",
         DocumentWorkspaceNode::vertical(vec![
             DocumentWorkspaceNode::horizontal(vec![
-                DocumentWorkspaceNode::document("doc:model_3d"),
+                DocumentWorkspaceNode::single_tab("doc:model_3d"),
                 DocumentWorkspaceNode::tabs(vec![
                     DocumentWorkspaceNode::document("doc:force_plot"),
                     DocumentWorkspaceNode::document("doc:bom_table"),
                     DocumentWorkspaceNode::document("doc:inspection_report"),
                 ]),
             ]),
-            DocumentWorkspaceNode::document("doc:notes"),
+            DocumentWorkspaceNode::single_tab("doc:notes"),
         ]),
     )
     .documents([
@@ -183,6 +195,9 @@ impl eframe::App for DemoApp {
         let selected_object_name = RefCell::new(self.selected_object_name.clone());
         let message_log = RefCell::new(self.message_log.clone());
         let saved_workspace_snapshot = RefCell::new(self.saved_workspace_snapshot.clone());
+        let saved_dock_snapshot = RefCell::new(self.saved_dock_snapshot.clone());
+        let pending_dock_drop =
+            RefCell::new(None::<(DemoDockDragPayload, DemoDockArea, DemoDockDropSlot)>);
         let top_dock_layout = RefCell::new(std::mem::replace(
             &mut self.top_dock_layout,
             DemoDockLayout::for_area(DemoDockArea::Top),
@@ -240,11 +255,17 @@ impl eframe::App for DemoApp {
                 }
             },
             |ui, state| {
-                top_dock_layout.borrow_mut().show(ui);
+                let dock_response = top_dock_layout.borrow_mut().show(ui);
+                if let Some((payload, slot)) = dock_response.dropped_payload {
+                    *pending_dock_drop.borrow_mut() = Some((payload, DemoDockArea::Top, slot));
+                }
                 state.status_message = format!("Top dock host active for {}", active_tool.borrow());
             },
             |ui, state| {
-                left_dock_layout.borrow_mut().show(ui);
+                let dock_response = left_dock_layout.borrow_mut().show(ui);
+                if let Some((payload, slot)) = dock_response.dropped_payload {
+                    *pending_dock_drop.borrow_mut() = Some((payload, DemoDockArea::Left, slot));
+                }
                 state.status_message = "Left dock host rendered with tabs and vertical split".to_owned();
             },
             |ui, state| {
@@ -261,11 +282,42 @@ impl eframe::App for DemoApp {
                     let bottom_visible = bottom_dock_layout.borrow().visible_panes();
 
                     ui.heading("Central Document Workspace");
-                    ui.label("中央文档区当前由 builder 描述初始 pane tree，并支持快照恢复；四边 dock 区提供一致的关闭后恢复入口。四个 dock host 之间允许显式迁移 panel，但中央 document pane 仍然不参与跨区移动。");
+                    ui.label("中央文档区当前由 builder 描述初始 pane tree，并支持快照恢复；四边 dock 区提供一致的关闭后恢复入口。dock pane 现在可以直接拖放到其他 dock host，中央 document pane 仍然不参与跨区移动。");
                     ui.add_space(8.0);
 
                     ui.group(|ui| {
                         ui.horizontal_wrapped(|ui| {
+                            if ui.button("Save Dock Host Snapshot").clicked() {
+                                *saved_dock_snapshot.borrow_mut() = Some(DockHostSnapshotBundle {
+                                    top: top_dock_layout.borrow().snapshot(),
+                                    left: left_dock_layout.borrow().snapshot(),
+                                    right: right_dock_layout.borrow().snapshot(),
+                                    bottom: bottom_dock_layout.borrow().snapshot(),
+                                });
+                                state.status_message = "Dock host snapshot saved".to_owned();
+                                push_message(&message_log, "Saved dock host snapshot bundle");
+                            }
+
+                            if ui
+                                .add_enabled(
+                                    saved_dock_snapshot.borrow().is_some(),
+                                    egui::Button::new("Restore Dock Host Snapshot"),
+                                )
+                                .clicked()
+                            {
+                                if let Some(snapshot) = saved_dock_snapshot.borrow().clone() {
+                                    top_dock_layout.borrow_mut().restore(snapshot.top);
+                                    left_dock_layout.borrow_mut().restore(snapshot.left);
+                                    right_dock_layout.borrow_mut().restore(snapshot.right);
+                                    bottom_dock_layout.borrow_mut().restore(snapshot.bottom);
+                                    state.status_message = "Dock host snapshot restored".to_owned();
+                                    push_message(
+                                        &message_log,
+                                        "Restored dock host snapshot bundle",
+                                    );
+                                }
+                            }
+
                             if ui.button("Save Workspace Snapshot").clicked() {
                                 *saved_workspace_snapshot.borrow_mut() =
                                     Some(center_workspace_layout.borrow().snapshot());
@@ -488,11 +540,17 @@ impl eframe::App for DemoApp {
                 });
             },
             |ui, state| {
-                right_dock_layout.borrow_mut().show(ui);
+                let dock_response = right_dock_layout.borrow_mut().show(ui);
+                if let Some((payload, slot)) = dock_response.dropped_payload {
+                    *pending_dock_drop.borrow_mut() = Some((payload, DemoDockArea::Right, slot));
+                }
                 state.status_message = "Right dock host rendered with tabbed and split panes".to_owned();
             },
             |ui, _state| {
-                bottom_dock_layout.borrow_mut().show(ui);
+                let dock_response = bottom_dock_layout.borrow_mut().show(ui);
+                if let Some((payload, slot)) = dock_response.dropped_payload {
+                    *pending_dock_drop.borrow_mut() = Some((payload, DemoDockArea::Bottom, slot));
+                }
                 ui.separator();
                 ui.label(RichText::new("Recent Shell Events").strong());
                 for entry in message_log.borrow().iter().rev().take(4) {
@@ -501,6 +559,121 @@ impl eframe::App for DemoApp {
             },
         );
 
+        if let Some((payload, target_area, target_slot)) = pending_dock_drop.into_inner() {
+            if payload.source_area != target_area {
+                let moved = match (payload.source_area, target_area) {
+                    (DemoDockArea::Top, DemoDockArea::Left) => {
+                        transfer_dock_pane(
+                            &top_dock_layout,
+                            &left_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Top, DemoDockArea::Right) => {
+                        transfer_dock_pane(
+                            &top_dock_layout,
+                            &right_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Top, DemoDockArea::Bottom) => {
+                        transfer_dock_pane(
+                            &top_dock_layout,
+                            &bottom_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Left, DemoDockArea::Top) => {
+                        transfer_dock_pane(
+                            &left_dock_layout,
+                            &top_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Left, DemoDockArea::Right) => {
+                        transfer_dock_pane(
+                            &left_dock_layout,
+                            &right_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Left, DemoDockArea::Bottom) => {
+                        transfer_dock_pane(
+                            &left_dock_layout,
+                            &bottom_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Right, DemoDockArea::Top) => {
+                        transfer_dock_pane(
+                            &right_dock_layout,
+                            &top_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Right, DemoDockArea::Left) => {
+                        transfer_dock_pane(
+                            &right_dock_layout,
+                            &left_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Right, DemoDockArea::Bottom) => {
+                        transfer_dock_pane(
+                            &right_dock_layout,
+                            &bottom_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Bottom, DemoDockArea::Top) => {
+                        transfer_dock_pane(
+                            &bottom_dock_layout,
+                            &top_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Bottom, DemoDockArea::Left) => {
+                        transfer_dock_pane(
+                            &bottom_dock_layout,
+                            &left_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    (DemoDockArea::Bottom, DemoDockArea::Right) => {
+                        transfer_dock_pane(
+                            &bottom_dock_layout,
+                            &right_dock_layout,
+                            &payload.title,
+                            target_slot,
+                        )
+                    }
+                    _ => false,
+                };
+
+                if moved {
+                    self.shell_state.status_message = format!(
+                        "Moved {} from {:?} to {:?}",
+                        payload.title, payload.source_area, target_area
+                    );
+                    push_message(&message_log, format!(
+                        "Dragged dock pane {} from {:?} to {:?}",
+                        payload.title, payload.source_area, target_area
+                    ));
+                }
+            }
+        }
+
         self.theme_mode = *theme_mode.borrow();
         self.active_tool = active_tool.into_inner();
         self.selected_object_name = selected_object_name.into_inner();
@@ -508,6 +681,7 @@ impl eframe::App for DemoApp {
         self.left_dock_layout = left_dock_layout.into_inner();
         self.center_workspace_layout = center_workspace_layout.into_inner();
         self.saved_workspace_snapshot = saved_workspace_snapshot.into_inner();
+        self.saved_dock_snapshot = saved_dock_snapshot.into_inner();
         self.right_dock_layout = right_dock_layout.into_inner();
         self.bottom_dock_layout = bottom_dock_layout.into_inner();
         self.message_log = message_log.into_inner();
@@ -529,7 +703,7 @@ fn render_dock_transfer_row(
         ui.label(format!("{source_name}:"));
         for title in pane_titles {
             if ui.small_button(format!("{title} -> {}", target_a.0)).clicked()
-                && transfer_dock_pane(source_layout, target_a.1, title)
+                && transfer_dock_pane(source_layout, target_a.1, title, DemoDockDropSlot::Center)
             {
                 state.status_message = format!("Moved {title} from {source_name} to {}", target_a.0);
                 push_message(
@@ -538,7 +712,7 @@ fn render_dock_transfer_row(
                 );
             }
             if ui.small_button(format!("{title} -> {}", target_b.0)).clicked()
-                && transfer_dock_pane(source_layout, target_b.1, title)
+                && transfer_dock_pane(source_layout, target_b.1, title, DemoDockDropSlot::Center)
             {
                 state.status_message = format!("Moved {title} from {source_name} to {}", target_b.0);
                 push_message(
@@ -547,7 +721,7 @@ fn render_dock_transfer_row(
                 );
             }
             if ui.small_button(format!("{title} -> {}", target_c.0)).clicked()
-                && transfer_dock_pane(source_layout, target_c.1, title)
+                && transfer_dock_pane(source_layout, target_c.1, title, DemoDockDropSlot::Center)
             {
                 state.status_message = format!("Moved {title} from {source_name} to {}", target_c.0);
                 push_message(

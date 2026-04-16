@@ -124,6 +124,7 @@
 2. 每个 dock region 内部的 pane tree 可以优先交由 egui_tiles 管理，以快速获得 tabs、horizontal split、vertical split、resize 和 drag-and-drop 能力。
 3. 如果后续需要更强的企业级定制，再在 egui_tiles 之上增加 panel metadata、pin/unpin 策略和命令绑定层。
 4. drag handle 与迁移入口的交互提示应明确区分两类边界：dock pane 可在四个 dock host 之间迁移，但不能拖入中央文档区；document pane 也不能拖出到 dock host。
+5. dock host 的状态建议和中央 workspace 一样提供 snapshot API，便于保存跨区迁移结果、关闭集合和额外注入 pane 的状态。
 
 ### 5.3 panels 模块
 

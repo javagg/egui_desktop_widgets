@@ -1,5 +1,5 @@
 use egui::{Align, Button, Color32, Layout, RichText, Sense, Ui};
-use egui_tiles::{Behavior, Tile, TileId, Tiles, Tree, UiResponse};
+use egui_tiles::{Behavior, SimplificationOptions, Tile, TileId, Tiles, Tree, UiResponse};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +153,10 @@ pub enum DocumentWorkspaceNode {
 impl DocumentWorkspaceNode {
     pub fn document(id: impl Into<String>) -> Self {
         Self::Document(id.into())
+    }
+
+    pub fn single_tab(id: impl Into<String>) -> Self {
+        Self::Tabs(vec![Self::Document(id.into())])
     }
 
     pub fn tabs(children: Vec<DocumentWorkspaceNode>) -> Self {
@@ -427,6 +431,13 @@ impl Behavior<WorkspaceDocument> for DocumentWorkspaceBehavior {
         self.gap_width
     }
 
+    fn simplification_options(&self) -> SimplificationOptions {
+        SimplificationOptions {
+            prune_single_child_tabs: false,
+            ..SimplificationOptions::default()
+        }
+    }
+
     fn is_tab_closable(&self, tiles: &Tiles<WorkspaceDocument>, tile_id: TileId) -> bool {
         match tiles.get(tile_id) {
             Some(Tile::Pane(pane)) => pane.closable,
@@ -590,14 +601,14 @@ fn build_node(
 fn demo_workspace_builder() -> DocumentWorkspaceBuilder {
     let root = DocumentWorkspaceNode::vertical(vec![
         DocumentWorkspaceNode::horizontal(vec![
-            DocumentWorkspaceNode::document("doc:model_3d"),
+            DocumentWorkspaceNode::single_tab("doc:model_3d"),
             DocumentWorkspaceNode::tabs(vec![
                 DocumentWorkspaceNode::document("doc:force_plot"),
                 DocumentWorkspaceNode::document("doc:bom_table"),
                 DocumentWorkspaceNode::document("doc:inspection_report"),
             ]),
         ]),
-        DocumentWorkspaceNode::document("doc:notes"),
+        DocumentWorkspaceNode::single_tab("doc:notes"),
     ]);
 
     DocumentWorkspaceBuilder::new("center_document_tree", root)
